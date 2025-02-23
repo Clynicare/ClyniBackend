@@ -1,1 +1,36 @@
-nodemodules
+# Node.js Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Next.js Build & Cache
+.next/
+out/
+dist/
+
+# Logs & Temp Files
+logs/
+*.log
+*.log.*
+.DS_Store
+*.swp
+*.swo
+*.swn
+
+# Env Files (DO NOT COMMIT API KEYS!)
+.env*
+.env.local
+.env.development.local
+.env.production.local
+.env.test.local
+
+# IDE/Editor Files
+.vscode/
+.idea/
+*.iml
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
