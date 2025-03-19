@@ -11,7 +11,6 @@ const SECRET_KEY = "thisisasecretkey";
 const Service = require('./models/service');
 const Booking = require('./models/booking');
 const User = require('./models/user');
-const user = require('./models/user');
 const service = require('./models/service');
 
 app.use(cors());
@@ -33,8 +32,7 @@ const authenticateToken = (req, res, next) => {
     const token = authHeader.split(' ')[1];
     jwt.verify(token, SECRET_KEY, async (err, decoded) => {
         if (err) return res.status(403).json({ message: "Invalid token", error: err });
-        
-        try {
+            try {
             const user = await User.findById(decoded.userID);
             if (!user) return res.status(404).json({ message: "User not found" });
             req.user = user;
@@ -78,9 +76,10 @@ app.post('/api/token-valid', authenticateToken, (req, res) => {
 app.post('/api/user', async (req, res) => {
     try {
         const { name, email, password, phone } = req.body;
+        console.log("its in th api user")
         const newUser = new User({ name, email, password, phone });
         await newUser.save();
-        res.status(201).json({ message: "User created successfully" });
+        res.status(200).json({ message: "User created successfully" });
     } catch (error) {
         res.status(500).json({ message: "Error creating user", error });
     }
@@ -97,21 +96,49 @@ app.post('/api/user', async (req, res) => {
 // });
 
 /** 🔹 Create Booking (Protected) */
-app.post('/api/bookings', authenticateToken, async (req, res) => {
+//authenticateToken
+app.post('/api/bookings',  authenticateToken,async (req, res) => {
     try {
         const { service_id, user_name, booking_date, booking_time, address, mobile_no } = req.body;
-        const newBooking = new Booking({ service_id, user_name, booking_date, booking_time, address, mobile_no });
+        let user_id=""
+        const userauth=req.headers['authorization'].split(" ")
+        jwt.verify(userauth[1],SECRET_KEY,(err,decoded)=>{
+            
+            if(err) return res.status(403).json({ message: "Invalid token before", error: err });
+            
+            try{
+                user_id=decoded.userID
+                console.log(user_id)
+            }catch(err){
+                console.log("error in verifying user",err)
+                return res.status(403).json({ message: "Invalid token after verifing", error: err });
+            }
+        })
+        const newBooking = new Booking({ service_id, user_id,user_name, booking_date, booking_time, address, mobile_no });
+        
         await newBooking.save();
-        res.status(201).json({ message: "Booking successfully created" });
+        res.status(200).json({ message: "Booking successfully created" });
     } catch (error) {
         res.status(500).json({ message: "Error saving booking", error });
     }
 });
-app.get("/Services", async (req, res) => {
-    try {
+
+app.get('/Bookings',authenticateToken,async(req,res)=>{
+    const requesteduser=req.user._id
+    const id=requesteduser.toString() 
+    const bookingdetails=await Booking.find({user_id:id})
+     return res.send(bookingdetails)
+})
+app.get("/Services/:id", async (req, res) => {
+    try {  
+        const id=req.params.id
+        if(id){
+            console.log(id)
+            const serviceInfo=await Service.find({_id:id})
+            console.log(serviceInfo)
+        }
       const name = req.query.name;
-      
-      console.log("Received query:", name);
+      console.log("Running services :", name);
       if (name) {
         
         const serviceInfo = await Service.find({
