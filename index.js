@@ -99,7 +99,8 @@ app.post('/api/user', async (req, res) => {
 //authenticateToken
 app.post('/api/bookings',  authenticateToken,async (req, res) => {
     try {
-        const { service_id, user_name, booking_date, booking_time, address, mobile_no } = req.body;
+        const { service_id, user_name, booking_date, booking_time, address, mobile_no,additional_requirements,gender } = req.body;
+        console.log(gender)
         let user_id=""
         const userauth=req.headers['authorization'].split(" ")
         jwt.verify(userauth[1],SECRET_KEY,(err,decoded)=>{
@@ -114,8 +115,7 @@ app.post('/api/bookings',  authenticateToken,async (req, res) => {
                 return res.status(403).json({ message: "Invalid token after verifing", error: err });
             }
         })
-        const newBooking = new Booking({ service_id, user_id,user_name, booking_date, booking_time, address, mobile_no });
-        
+        const newBooking = new Booking({ service_id, user_id,user_name, booking_date, booking_time, address, mobile_no,additional_requirements,gender });
         await newBooking.save();
         res.status(200).json({ message: "Booking successfully created" });
     } catch (error) {
@@ -127,38 +127,46 @@ app.get('/Bookings',authenticateToken,async(req,res)=>{
     const requesteduser=req.user._id
     const id=requesteduser.toString() 
     const bookingdetails=await Booking.find({user_id:id})
+    .populate('service_id','service_name service_category service_description')
+    .populate('user_id','email')
+    console.log("this is the booking",bookingdetails)
+    if(bookingdetails){
      return res.send(bookingdetails)
+    }
+    else{
+        return res.send("No Bookings Found")
+    }
 })
-app.get("/Services/:id", async (req, res) => {
+app.get("/Services", async (req, res) => {
     try {  
-        const id=req.params.id
-        if(id){
-            console.log(id)
-            const serviceInfo=await Service.find({_id:id})
-            console.log(serviceInfo)
+        console.log("Received query:", req.url); // Debugging
+
+        const { name } = req.query;
+        console.log("Extracted name:", name); // Check if name is extracted
+
+        if (name) {
+            const serviceInfo = await Service.find({
+                service_name: { $regex: new RegExp(name, "i") },
+            });
+
+            if (serviceInfo.length === 0) {
+                return res.status(404).json({ message: "Service not found" });
+            }
+
+            return res.status(200).json(serviceInfo);
         }
-      const name = req.query.name;
-      console.log("Running services :", name);
-      if (name) {
-        
-        const serviceInfo = await Service.find({
-          service_name: { $regex: new RegExp(name, "i") },
-        });
-        console.log(serviceInfo)
-        if (serviceInfo.length === 0) {
-          return res.status(404).json({ message: "Service not found" });
-        }
-  
-        return res.status(200).json(serviceInfo);
-      } else {
+
+        // Fetch all services if no name is provided
         const services = await Service.find({});
         return res.status(200).json(services);
-      }
+
     } catch (error) {
-      console.error("Error fetching service:", error);
-      res.status(500).json({ error: "Internal Server Error" });
+        console.error("Error fetching services:", error);
+        res.status(500).json({ error: "Internal Server Error" });
     }
-  });
+});
+
+
 /** 🔹 Global Error Handler */
 app.use((err, req, res, next) => {
     console.error(err.stack);
