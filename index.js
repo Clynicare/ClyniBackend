@@ -31,7 +31,7 @@ const authenticateToken = (req, res, next) => {
     
     const token = authHeader.split(' ')[1];
     jwt.verify(token, SECRET_KEY, async (err, decoded) => {
-        if (err) return res.status(403).json({ message: "Invalid token", error: err });
+        if (err) return  res.status(403).json({ message: "Invalid token", error: err });
             try {
             const user = await User.findById(decoded.userID);
             if (!user) return res.status(404).json({ message: "User not found" });
@@ -99,23 +99,23 @@ app.post('/api/user', async (req, res) => {
 //authenticateToken
 app.post('/api/bookings',  authenticateToken,async (req, res) => {
     try {
-        const { service_id, user_name, booking_date, booking_time, address, mobile_no,additional_requirements,gender } = req.body;
+        const { service_id, patient_name, booking_date, booking_time, address, mobile_no,additional_requirements,gender } = req.body;
         console.log(gender)
         let user_id=""
         const userauth=req.headers['authorization'].split(" ")
         jwt.verify(userauth[1],SECRET_KEY,(err,decoded)=>{
             
-            if(err) return res.status(403).json({ message: "Invalid token before", error: err });
+            if(err) return res.status(401).json({ message: "Invalid token before", error: err });
             
             try{
                 user_id=decoded.userID
-                console.log(user_id)
+                console.log(user_id,"this is user id")
             }catch(err){
                 console.log("error in verifying user",err)
                 return res.status(403).json({ message: "Invalid token after verifing", error: err });
             }
         })
-        const newBooking = new Booking({ service_id, user_id,user_name, booking_date, booking_time, address, mobile_no,additional_requirements,gender });
+        const newBooking = new Booking({ service_id, user_id,patient_name, booking_date, booking_time, address, mobile_no,additional_requirements,gender });
         await newBooking.save();
         res.status(200).json({ message: "Booking successfully created" });
     } catch (error) {
