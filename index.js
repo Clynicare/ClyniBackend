@@ -27,10 +27,7 @@ mongoose.connect(MONGO_URL, {
 
 // Redis client (v4+)
 const redisClient = redis.createClient({
-  socket: {
-    host: process.env.REDIS_HOST || 'redis',  // This MUST match the docker-compose service name
-    port: process.env.REDIS_PORT || 6379,
-  }
+  url:process.env.REDIS_URL
 });
 redisClient.connect()
   .then(() => console.log("✅ Connected to Redis"))
