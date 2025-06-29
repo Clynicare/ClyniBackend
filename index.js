@@ -28,7 +28,11 @@ mongoose.connect(MONGO_URL, {
 
 // Redis client (v4+)
 const redisClient = redis.createClient({
-  url:process.env.REDIS_URL ||"rediss://default:AYv7AAIjcDFmZWNlNTE1YWFjMTI0OWUwOTBlMTk2MWFmYjZmOGQ1NHAxMA@immense-adder-35835.upstash.io:6379"
+  url:process.env.REDIS_URL ||"rediss://default:AYv7AAIjcDFmZWNlNTE1YWFjMTI0OWUwOTBlMTk2MWFmYjZmOGQ1NHAxMA@immense-adder-35835.upstash.io:6379",
+  socket: {
+    tls: true,   // force TLS (required for Upstash)
+    rejectUnauthorized: false, // optional for avoiding SSL cert warnings
+  }
 });
 redisClient.connect()
   .then(() => console.log("✅ Connected to Redis"))
