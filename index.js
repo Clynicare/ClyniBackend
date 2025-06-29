@@ -17,7 +17,7 @@ const MONGO_URL = process.env.MONGO_URL || "your-fallback-mongo-url";
 const SECRET_KEY = process.env.SECRET_KEY || "thisisasecretkey";
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
-
+const compression=require('compression');
 // Connect to MongoDB
 mongoose.connect(MONGO_URL, {
   useNewUrlParser: true,
