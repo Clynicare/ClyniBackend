@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const redis = require('redis');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
+const bcrypt = require('bcrypt');
 
 // Models
 const User = require('./models/user');
@@ -27,7 +28,7 @@ mongoose.connect(MONGO_URL, {
 
 // Redis client (v4+)
 const redisClient = redis.createClient({
-  url:process.env.REDIS_URL
+  url:process.env.REDIS_URL ||"rediss://default:AYv7AAIjcDFmZWNlNTE1YWFjMTI0OWUwOTBlMTk2MWFmYjZmOGQ1NHAxMA@immense-adder-35835.upstash.io:6379"
 });
 redisClient.connect()
   .then(() => console.log("✅ Connected to Redis"))
@@ -39,6 +40,8 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 app.use(compression());
+app.disable('x-powered-by');
+
 
 // Rate limiter
 const limiter = rateLimit({
@@ -80,7 +83,9 @@ const newUser = new User({ name, email, password: hashedPassword, phone });
     res.status(500).json({ message: "Registration failed", error: err });
   }
 });
-app.get('/health', (req, res) => res.send("✅ Server healthy"));
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: "ok", mongo: mongoose.connection.readyState === 1 });
+});
 
 
 // 🔐 Login
@@ -89,8 +94,8 @@ app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
     const user = await User.findOne({ email });
 const isMatch = await bcrypt.compare(password, user.password);
+
 if (!user || !isMatch) return res.status(401).json({ message: "Invalid credentials" });
-    if (!user) return res.status(401).json({ message: "Invalid credentials" });
 
     const token = jwt.sign({ userID: user._id }, SECRET_KEY, { expiresIn: '1h' });
     res.status(200).json({ token });
