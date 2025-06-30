@@ -14,7 +14,7 @@ const Booking = require('./models/booking');
 
 const app = express();
 const PORT = process.env.PORT || 7000;
-const MONGO_URL = process.env.MONGO_URL || "your-fallback-mongo-url";
+const MONGO_URL = process.env.MONGO_URL || "mongodb+srv://syedakousar222:youjv72XqW9Inn8n@amreen.j1fof.mongodb.net/";
 const SECRET_KEY = process.env.SECRET_KEY || "thisisasecretkey";
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -79,34 +79,71 @@ const authenticateToken = async (req, res, next) => {
 app.post('/api/user', async (req, res) => {
   try {
     const { name, email, password, phone } = req.body;
+    console.log("🚀 Registering:", { name, email, phone });
+
+    if (!name || !email || !password || !phone) {
+      return res.status(400).json({ message: "All fields are required" });
+    }
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(409).json({ message: "User already exists" });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
-const newUser = new User({ name, email, password: hashedPassword, phone });
+
+    const newUser = new User({
+      name,
+      email,
+      password: hashedPassword,
+      phone,
+    });
+
     await newUser.save();
+    console.log("✅ User registered:", email);
     res.status(201).json({ message: "User registered successfully" });
   } catch (err) {
-    res.status(500).json({ message: "Registration failed", error: err });
+    console.error("❌ Registration Error:", err);
+    res.status(500).json({ message: "Registration failed", error: err.message });
   }
 });
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: "ok", mongo: mongoose.connection.readyState === 1 });
-});
+
 
 
 // 🔐 Login
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
+    console.log("email", email, "pass", password);
+
+    // Step 1: Find user by email
     const user = await User.findOne({ email });
-const isMatch = await bcrypt.compare(password, user.password);
 
-if (!user || !isMatch) return res.status(401).json({ message: "Invalid credentials" });
+    // Step 2: If user doesn't exist, return error
+    if (!user) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
 
-    const token = jwt.sign({ userID: user._id }, SECRET_KEY, { expiresIn: '1h' });
+    // Step 3: Compare passwords
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    // Step 4: If password doesn't match, return error
+    if (!isMatch) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    // Step 5: Generate JWT token
+    const token = jwt.sign({ userID: user._id }, process.env.SECRET_KEY, { expiresIn: '1h' });
+
+    // Step 6: Return success
     res.status(200).json({ token });
+
   } catch (err) {
-    res.status(500).json({ message: "Login failed", error: err });
+    console.error(err);
+    res.status(500).json({ message: "Login failed", error: err.message });
   }
 });
+
 
 // 🔐 Token Check
 app.post('/api/token-valid', authenticateToken, (req, res) => {
