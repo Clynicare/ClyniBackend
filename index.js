@@ -1,3 +1,6 @@
+// Load environment variables first
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
@@ -18,30 +21,46 @@ const NurseBooking = require('./models/nurseBooking');
 const { sendBookingRequestSMS, sendBookingStatusSMS, sendNurseBookingNotificationSMS, sendServiceCompletionSMS, sendNurseHandoffSMS, sendDoctorJoinSMS } = require('./services/smsService');
 
 const app = express();
-const PORT = process.env.PORT || 7000;
-const MONGO_URL = process.env.MONGO_URL || "mongodb://localhost:27017/clynicare";
+const PORT = 7000;
+const MONGO_URL = process.env.MONGO_URL;
 const SECRET_KEY = process.env.SECRET_KEY || "your-secret-key-here";
-const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
-const REDIS_PORT = process.env.REDIS_PORT || 6379;
+
+if (!MONGO_URL) {
+  console.error('❌ MONGO_URL environment variable is required');
+  process.exit(1);
+}
+
+console.log('🔍 Environment check:');
+console.log('MONGO_URL:', MONGO_URL ? 'Set' : 'Not set');
+console.log('REDIS_URL:', process.env.REDIS_URL ? 'Set' : 'Not set');
 const compression=require('compression');
 // Connect to MongoDB
-mongoose.connect(MONGO_URL, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-}).then(() => console.log("✅ MongoDB Connected"))
-  .catch(err => console.error("❌ MongoDB Connection Error:", err));
+mongoose.connect(MONGO_URL)
+  .then(() => console.log("✅ MongoDB Connected"))
+  .catch(err => {
+    console.error("❌ MongoDB Connection Error:", err.message);
+    process.exit(1);
+  });
 
 // Redis client (v4+)
-const redisClient = redis.createClient({
-  url: process.env.REDIS_URL || "redis://localhost:6379",
-  socket: {
-    tls: true,   // force TLS (required for Upstash)
-    rejectUnauthorized: false, // optional for avoiding SSL cert warnings
-  }
-});
-redisClient.connect()
-  .then(() => console.log("✅ Connected to Redis"))
-  .catch((err) => console.error("❌ Redis connection failed:", err));
+let redisClient = null;
+if (process.env.REDIS_URL) {
+  redisClient = redis.createClient({
+    url: process.env.REDIS_URL,
+    socket: {
+      tls: true,
+      rejectUnauthorized: false
+    }
+  });
+  redisClient.connect()
+    .then(() => console.log("✅ Connected to Redis"))
+    .catch((err) => {
+      console.error("❌ Redis connection failed:", err.message);
+      redisClient = null;
+    });
+} else {
+  console.log("⚠️ Redis URL not configured, caching disabled");
+}
 
 // Middleware
 app.use(cors());
@@ -193,21 +212,35 @@ app.get("/Services", async (req, res) => {
     const { name } = req.query;
     const cacheKey = name ? `service_${name}` : 'services_all';
 
-    const cached = await redisClient.get(cacheKey);
-    if (cached) {
-      console.log("✅ Cache hit");
-      return res.status(200).json(JSON.parse(cached));
+    // Try Redis cache if available
+    if (redisClient) {
+      try {
+        const cached = await redisClient.get(cacheKey);
+        if (cached) {
+          console.log("✅ Cache hit");
+          return res.status(200).json(JSON.parse(cached));
+        }
+      } catch (cacheErr) {
+        console.log("⚠️ Cache read failed, proceeding without cache");
+      }
     }
 
     const query = name ? { service_name: { $regex: new RegExp(name, 'i') } } : {};
     const services = await Service.find(query);
     if (!services.length) return res.status(404).json({ message: "No services found" });
 
-    await redisClient.set(cacheKey, JSON.stringify(services), {
-      EX: 3600  // 1 hour cache
-    });
+    // Try to cache if Redis is available
+    if (redisClient) {
+      try {
+        await redisClient.set(cacheKey, JSON.stringify(services), {
+          EX: 3600  // 1 hour cache
+        });
+        console.log("✅ Cache miss - stored in Redis");
+      } catch (cacheErr) {
+        console.log("⚠️ Cache write failed, proceeding without cache");
+      }
+    }
 
-    console.log("✅ Cache miss - stored in Redis");
     res.status(200).json(services);
   } catch (err) {
     console.error("❌ Service fetch error:", err);
