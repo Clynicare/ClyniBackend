@@ -18,6 +18,7 @@ const Nurse = require('./models/nurse');
 const Agency = require('./models/agency');
 const Doctor = require('./models/doctor');
 const NurseBooking = require('./models/nurseBooking');
+const Admin = require('./models/admin');
 const { sendBookingRequestSMS, sendBookingStatusSMS, sendNurseBookingNotificationSMS, sendServiceCompletionSMS, sendNurseHandoffSMS, sendDoctorJoinSMS } = require('./services/smsService');
 
 const app = express();
@@ -479,7 +480,7 @@ app.get('/api/nurse-bookings', authenticateToken, async (req, res) => {
 // Agency registration
 app.post('/api/agency/register', async (req, res) => {
   try {
-    const { name, email, password, phone, license_number, address, description } = req.body;
+    const { name, email, password, phone, license_number, address, description, services_offered, coverage_areas } = req.body;
     
     const existingAgency = await Agency.findOne({ $or: [{ email }, { license_number }] });
     if (existingAgency) {
@@ -495,11 +496,18 @@ app.post('/api/agency/register', async (req, res) => {
       phone,
       license_number,
       address,
-      description
+      description,
+      services_offered: services_offered || [],
+      coverage_areas: coverage_areas || [],
+      status: 'pending_verification', // Default pending status
+      is_verified: false // Requires admin approval
     });
     
     await newAgency.save();
-    res.status(201).json({ message: "Agency registered successfully" });
+    res.status(201).json({ 
+      message: "Agency registration submitted successfully. Please wait for admin approval.",
+      status: "pending_verification"
+    });
   } catch (err) {
     res.status(500).json({ message: "Registration failed", error: err.message });
   }
@@ -520,9 +528,40 @@ app.post('/api/agency/login', async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
     
+    // Check verification status
+    if (agency.status === 'pending_verification') {
+      return res.status(403).json({ 
+        message: "Your agency registration is pending admin approval. Please wait for verification.",
+        status: "pending_verification"
+      });
+    }
+    
+    if (agency.status === 'inactive') {
+      return res.status(403).json({ 
+        message: "Your agency account has been deactivated. Please contact support.",
+        status: "inactive"
+      });
+    }
+    
+    if (!agency.is_verified) {
+      return res.status(403).json({ 
+        message: "Your agency is not verified. Please contact support.",
+        status: "not_verified"
+      });
+    }
+    
     const token = jwt.sign({ agencyID: agency._id, type: 'agency' }, SECRET_KEY, { expiresIn: '24h' });
     
-    res.status(200).json({ token, agency: { id: agency._id, name: agency.name, email: agency.email } });
+    res.status(200).json({ 
+      token, 
+      agency: { 
+        id: agency._id, 
+        name: agency.name, 
+        email: agency.email,
+        status: agency.status,
+        is_verified: agency.is_verified
+      } 
+    });
   } catch (err) {
     res.status(500).json({ message: "Login failed", error: err.message });
   }
@@ -1038,6 +1077,135 @@ app.post('/api/doctor/login', async (req, res) => {
     }
   } catch (err) {
     res.status(500).json({ message: "Login failed", error: err.message });
+  }
+});
+
+// 🔐 ADMIN AUTHENTICATION & AGENCY APPROVAL
+
+// Admin login
+app.post('/api/admin/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    const admin = await Admin.findOne({ email, status: 'active' });
+    if (!admin) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+    
+    const isMatch = await bcrypt.compare(password, admin.password);
+    if (!isMatch) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+    
+    admin.last_login = new Date();
+    await admin.save();
+    
+    const token = jwt.sign({ adminID: admin._id, type: 'admin' }, SECRET_KEY, { expiresIn: '24h' });
+    
+    res.status(200).json({ 
+      token, 
+      admin: { 
+        id: admin._id, 
+        name: admin.name, 
+        email: admin.email, 
+        role: admin.role,
+        permissions: admin.permissions
+      } 
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Login failed", error: err.message });
+  }
+});
+
+// Admin middleware
+const authenticateAdmin = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split(' ')[1];
+  
+  if (!token) return res.status(401).json({ message: "Access denied. No token provided." });
+  
+  try {
+    const decoded = jwt.verify(token, SECRET_KEY);
+    if (decoded.type !== 'admin') {
+      return res.status(403).json({ message: "Access denied. Admin token required." });
+    }
+    
+    const admin = await Admin.findById(decoded.adminID);
+    if (!admin || admin.status !== 'active') {
+      return res.status(404).json({ message: "Admin not found or inactive" });
+    }
+    
+    req.admin = admin;
+    next();
+  } catch (err) {
+    res.status(403).json({ message: "Invalid token", error: err.message });
+  }
+};
+
+// Get pending agencies for approval
+app.get('/api/admin/agencies/pending', authenticateAdmin, async (req, res) => {
+  try {
+    const agencies = await Agency.find({ 
+      status: 'pending_verification',
+      is_verified: false 
+    }).sort({ createdAt: -1 });
+    
+    res.status(200).json(agencies);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching pending agencies", error: err.message });
+  }
+});
+
+// Approve/Reject agency
+app.put('/api/admin/agencies/:id/status', authenticateAdmin, async (req, res) => {
+  try {
+    const { status, rejection_reason } = req.body; // status: 'active' or 'inactive'
+    
+    const agency = await Agency.findById(req.params.id);
+    if (!agency) {
+      return res.status(404).json({ message: "Agency not found" });
+    }
+    
+    if (status === 'active') {
+      agency.status = 'active';
+      agency.is_verified = true;
+    } else {
+      agency.status = 'inactive';
+      agency.rejection_reason = rejection_reason;
+    }
+    
+    await agency.save();
+    
+    res.status(200).json({ 
+      message: `Agency ${status === 'active' ? 'approved' : 'rejected'} successfully`, 
+      agency 
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Error updating agency status", error: err.message });
+  }
+});
+
+// Get all agencies (for admin)
+app.get('/api/admin/agencies', authenticateAdmin, async (req, res) => {
+  try {
+    const { status, page = 1, limit = 10 } = req.query;
+    const query = status ? { status } : {};
+    
+    const agencies = await Agency.find(query)
+      .limit(limit * 1)
+      .skip((page - 1) * limit)
+      .sort({ createdAt: -1 });
+    
+    const total = await Agency.countDocuments(query);
+    
+    res.status(200).json({
+      agencies,
+      totalPages: Math.ceil(total / limit),
+      currentPage: page,
+      total
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching agencies", error: err.message });
   }
 });
 
