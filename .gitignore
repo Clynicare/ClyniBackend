@@ -20,6 +20,7 @@ logs/
 
 # Env Files (DO NOT COMMIT API KEYS!)
 .env*
+.env
 .env.local
 .env.development.local
 .env.production.local
