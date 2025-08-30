@@ -1,4 +1,5 @@
-const twilio = require('twilio');
+const client = require("twilio")(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+
 
 // Twilio configuration
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
@@ -8,7 +9,7 @@ const apiKeySecret = process.env.TWILIO_API_KEY_SECRET;
 const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER;
 
 // Initialize Twilio client
-let client;
+
 if (accountSid && authToken) {
   client = twilio(accountSid, authToken);
 } else if (apiKeySid && apiKeySecret && accountSid) {
