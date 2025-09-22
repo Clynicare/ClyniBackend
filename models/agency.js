@@ -21,6 +21,7 @@ const agencySchema = new mongoose.Schema({
     total_reviews: { type: Number, default: 0 },
     status: { type: String, enum: ['active', 'inactive', 'pending_verification'], default: 'pending_verification' },
     is_verified: { type: Boolean, default: false },
+    email_verified: { type: Boolean, default: false }, // Track if email is verified via OTP
     subscription_plan: { type: String, enum: ['basic', 'premium', 'enterprise'], default: 'basic' },
     commission_rate: { type: Number, default: 0.15, min: 0, max: 1 }
 }, { timestamps: true });

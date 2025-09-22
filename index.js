@@ -10,7 +10,7 @@ const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcrypt');
 
-// Models
+// Enhanced Models
 const User = require('./models/user');
 const Service = require('./models/service');
 const Booking = require('./models/booking');
@@ -19,10 +19,34 @@ const Agency = require('./models/agency');
 const Doctor = require('./models/doctor');
 const NurseBooking = require('./models/nurseBooking');
 const Admin = require('./models/admin');
+const OTP = require('./models/otp');
+const TeleSession = require('./models/teleSession');
+const Prescription = require('./models/prescription');
+const Settlement = require('./models/settlement');
+
+// Enhanced Services
 const { sendBookingRequestSMS, sendBookingStatusSMS, sendNurseBookingNotificationSMS, sendServiceCompletionSMS, sendNurseHandoffSMS, sendDoctorJoinSMS } = require('./services/smsService');
+const { generateOTP, sendUserRegistrationOTP, sendAgencyRegistrationOTP, sendDoctorRegistrationOTP, sendWelcomeEmail } = require('./services/emailService');
+const TelehealthService = require('./services/telehealthService');
+const phonePeService = require('./services/phonePeService');
+const NotificationService = require('./services/notificationService');
+
+// Routes
+const paymentRoutes = require('./routes/payments-minimal');
+
+// Middleware System
+const { 
+  securityMiddleware, 
+  corsMiddleware, 
+  rateLimitMiddleware, 
+  authenticateToken, 
+  authenticateRole,
+  requestLogger, 
+  errorHandler 
+} = require('./middleware');
 
 const app = express();
-const PORT = 7000;
+const PORT = process.env.PORT || 7000;
 const MONGO_URL = process.env.MONGO_URL;
 const SECRET_KEY = process.env.SECRET_KEY || "your-secret-key-here";
 
@@ -34,9 +58,21 @@ if (!MONGO_URL) {
 console.log('🔍 Environment check:');
 console.log('MONGO_URL:', MONGO_URL ? 'Set' : 'Not set');
 console.log('REDIS_URL:', process.env.REDIS_URL ? 'Set' : 'Not set');
-const compression=require('compression');
-// Connect to MongoDB
-mongoose.connect(MONGO_URL)
+console.log('NODE_ENV:', process.env.NODE_ENV || 'development');
+
+// Apply comprehensive middleware stack
+app.use(securityMiddleware);
+app.use(corsMiddleware);
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(requestLogger);
+app.use(rateLimitMiddleware.general);
+
+// Database Connections
+mongoose.connect(MONGO_URL, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
   .then(() => console.log("✅ MongoDB Connected"))
   .catch(err => {
     console.error("❌ MongoDB Connection Error:", err.message);
@@ -63,73 +99,576 @@ if (process.env.REDIS_URL) {
   console.log("⚠️ Redis URL not configured, caching disabled");
 }
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(morgan('dev'));
-app.use(compression());
-app.disable('x-powered-by');
+// REGISTER PAYMENT ROUTES - PhonePe Dual Payment System (COD + UPI)
+app.use('/api/payments', paymentRoutes);
 
+// �👨‍⚕️ TELECONSULTATION ROUTES
 
-// Rate limiter
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100,
-  message: "Too many requests, please try again later.",
-});
-app.use(limiter);
-
-// JWT Authentication Middleware
-const authenticateToken = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.split(' ')[1];
-
-  if (!token) return res.status(401).json({ message: "Access denied. No token provided." });
-
+// Initiate teleconsultation session
+app.post('/api/teleconsultation/initiate', authenticateRole('nurse'), async (req, res) => {
   try {
-    const decoded = jwt.verify(token, SECRET_KEY);
-    const user = await User.findById(decoded.userID);
-    if (!user) return res.status(404).json({ message: "User not found" });
-    req.user = user;
-    next();
+    const { booking_id, session_type, patient_symptoms, vital_signs } = req.body;
+    
+    console.log('🎥 [TELECONSULTATION] Initiating session for booking:', booking_id);
+    
+    const sessionData = {
+      booking_id,
+      session_type: session_type || 'hybrid',
+      patient_symptoms: patient_symptoms || '',
+      vital_signs: vital_signs || {},
+      urgency: req.body.urgency || 'routine',
+      specialization: req.body.specialization || 'general'
+    };
+    
+    const result = await TelehealthService.initiateSession(sessionData, req.nurse);
+    
+    res.status(201).json({
+      message: 'Teleconsultation session initiated successfully',
+      session: result.session,
+      webrtc_config: result.webrtc_config
+    });
+    
   } catch (err) {
-    res.status(403).json({ message: "Invalid token", error: err });
+    console.error('❌ [TELECONSULTATION] Initiation error:', err);
+    res.status(500).json({ message: 'Failed to initiate teleconsultation', error: err.message });
   }
-};
+});
 
-// Routes
+// Doctor joins teleconsultation
+app.post('/api/teleconsultation/:sessionId/doctor-join', authenticateRole('doctor'), async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    console.log('👨‍⚕️ [TELECONSULTATION] Doctor joining session:', sessionId);
+    
+    const result = await TelehealthService.doctorJoinSession(sessionId, req.doctor);
+    
+    res.status(200).json({
+      message: 'Doctor joined teleconsultation successfully',
+      session: result.session,
+      webrtc_config: result.webrtc_config
+    });
+    
+  } catch (err) {
+    console.error('❌ [TELECONSULTATION] Doctor join error:', err);
+    res.status(500).json({ message: 'Failed to join teleconsultation', error: err.message });
+  }
+});
 
-// 🔐 Register
-app.post('/api/user', async (req, res) => {
+// Patient joins teleconsultation
+app.post('/api/teleconsultation/:sessionId/patient-join', authenticateToken, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    console.log('👤 [TELECONSULTATION] Patient joining session:', sessionId);
+    
+    const result = await TelehealthService.patientJoinSession(sessionId, req.user);
+    
+    res.status(200).json({
+      message: 'Patient joined teleconsultation successfully',
+      session: result.session,
+      webrtc_config: result.webrtc_config
+    });
+    
+  } catch (err) {
+    console.error('❌ [TELECONSULTATION] Patient join error:', err);
+    res.status(500).json({ message: 'Failed to join teleconsultation', error: err.message });
+  }
+});
+
+// End teleconsultation session
+app.post('/api/teleconsultation/:sessionId/end', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { treatment_notes, prescription_needed, follow_up_required } = req.body;
+    
+    console.log('🏁 [TELECONSULTATION] Ending session:', sessionId);
+    
+    const sessionData = {
+      treatment_notes: treatment_notes || '',
+      prescription_needed: prescription_needed || false,
+      follow_up_required: follow_up_required || false
+    };
+    
+    const result = await TelehealthService.endSession(sessionId, sessionData);
+    
+    res.status(200).json({
+      message: 'Teleconsultation session ended successfully',
+      session: result.session,
+      prescription: result.prescription || null
+    });
+    
+  } catch (err) {
+    console.error('❌ [TELECONSULTATION] End session error:', err);
+    res.status(500).json({ message: 'Failed to end teleconsultation', error: err.message });
+  }
+});
+
+// Get teleconsultation session details
+app.get('/api/teleconsultation/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    const session = await TeleSession.findOne({ session_id: sessionId })
+      .populate('booking_id')
+      .populate('participants.patient', 'name email phone')
+      .populate('participants.nurse', 'name phone specializations')
+      .populate('participants.doctor', 'name specialization consultation_fee');
+    
+    if (!session) {
+      return res.status(404).json({ message: 'Teleconsultation session not found' });
+    }
+    
+    res.status(200).json({ session });
+    
+  } catch (err) {
+    console.error('❌ [TELECONSULTATION] Get session error:', err);
+    res.status(500).json({ message: 'Failed to get teleconsultation details', error: err.message });
+  }
+});
+
+// 💊 PRESCRIPTION ROUTES
+
+// Generate prescription
+app.post('/api/prescriptions/generate', authenticateRole('doctor'), async (req, res) => {
+  try {
+    const { 
+      patient_id, 
+      booking_id, 
+      session_id, 
+      medications, 
+      diagnosis, 
+      treatment_plan, 
+      follow_up_date 
+    } = req.body;
+    
+    console.log('💊 [PRESCRIPTION] Generating prescription for patient:', patient_id);
+    
+    const prescriptionData = {
+      patient_id,
+      booking_id,
+      session_id,
+      medications: medications || [],
+      diagnosis: diagnosis || '',
+      treatment_plan: treatment_plan || '',
+      follow_up_date: follow_up_date ? new Date(follow_up_date) : null
+    };
+    
+    const result = await TelehealthService.generatePrescription(prescriptionData, req.doctor);
+    
+    res.status(201).json({
+      message: 'Prescription generated successfully',
+      prescription: result.prescription,
+      pdf_url: result.pdf_url
+    });
+    
+  } catch (err) {
+    console.error('❌ [PRESCRIPTION] Generation error:', err);
+    res.status(500).json({ message: 'Failed to generate prescription', error: err.message });
+  }
+});
+
+// Get prescription details
+app.get('/api/prescriptions/:prescriptionId', async (req, res) => {
+  try {
+    const { prescriptionId } = req.params;
+    
+    const prescription = await Prescription.findOne({ prescription_id: prescriptionId })
+      .populate('doctor_id', 'name medical_license specialization')
+      .populate('patient_id', 'name email phone')
+      .populate('booking_id')
+      .populate('session_id');
+    
+    if (!prescription) {
+      return res.status(404).json({ message: 'Prescription not found' });
+    }
+    
+    res.status(200).json({ prescription });
+    
+  } catch (err) {
+    console.error('❌ [PRESCRIPTION] Get prescription error:', err);
+    res.status(500).json({ message: 'Failed to get prescription details', error: err.message });
+  }
+});
+
+// Get user's prescriptions
+app.get('/api/prescriptions', authenticateToken, async (req, res) => {
+  try {
+    const prescriptions = await Prescription.find({ patient_id: req.user._id })
+      .populate('doctor_id', 'name specialization')
+      .sort({ created_at: -1 });
+    
+    res.status(200).json({ prescriptions });
+    
+  } catch (err) {
+    console.error('❌ [PRESCRIPTION] Get prescriptions error:', err);
+    res.status(500).json({ message: 'Failed to get prescriptions', error: err.message });
+  }
+});
+
+// 💳 PAYMENT ROUTES
+
+// Create payment order
+app.post('/api/payments/create-order', authenticateToken, async (req, res) => {
+  try {
+    const { booking_id, amount, payment_type } = req.body;
+    
+    console.log('💳 [PAYMENT] Creating payment order for booking:', booking_id);
+    
+    const result = await PaymentService.createPaymentOrder(
+      booking_id, 
+      amount, 
+      req.user._id,
+      payment_type || 'booking'
+    );
+    
+    res.status(200).json({
+      message: 'Payment order created successfully',
+      order: result.order,
+      razorpay_order_id: result.razorpay_order_id
+    });
+    
+  } catch (err) {
+    console.error('❌ [PAYMENT] Create order error:', err);
+    res.status(500).json({ message: 'Failed to create payment order', error: err.message });
+  }
+});
+
+// Verify payment
+app.post('/api/payments/verify', authenticateToken, async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+    
+    console.log('✅ [PAYMENT] Verifying payment:', razorpay_payment_id);
+    
+    const result = await PaymentService.verifyPayment({
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature
+    });
+    
+    res.status(200).json({
+      message: 'Payment verified successfully',
+      payment: result.payment,
+      settlement: result.settlement
+    });
+    
+  } catch (err) {
+    console.error('❌ [PAYMENT] Verify payment error:', err);
+    res.status(400).json({ message: 'Payment verification failed', error: err.message });
+  }
+});
+
+// Process refund
+app.post('/api/payments/refund', authenticateToken, async (req, res) => {
+  try {
+    const { payment_id, amount, reason } = req.body;
+    
+    console.log('💸 [PAYMENT] Processing refund for payment:', payment_id);
+    
+    const result = await PaymentService.processRefund(payment_id, amount, reason);
+    
+    res.status(200).json({
+      message: 'Refund processed successfully',
+      refund: result.refund
+    });
+    
+  } catch (err) {
+    console.error('❌ [PAYMENT] Refund error:', err);
+    res.status(500).json({ message: 'Failed to process refund', error: err.message });
+  }
+});
+
+// Payment webhook (for Razorpay)
+app.post('/api/payments/webhook', async (req, res) => {
+  try {
+    console.log('🔗 [PAYMENT] Webhook received:', req.body.event);
+    
+    const result = await PaymentService.handleWebhook(req.body, req.headers);
+    
+    res.status(200).json({ message: 'Webhook processed successfully' });
+    
+  } catch (err) {
+    console.error('❌ [PAYMENT] Webhook error:', err);
+    res.status(400).json({ message: 'Webhook processing failed', error: err.message });
+  }
+});
+
+// 💰 SETTLEMENT ROUTES
+
+// Get agency settlements
+app.get('/api/settlements/agency', authenticateRole('agency'), async (req, res) => {
+  try {
+    const { start_date, end_date, status } = req.query;
+    
+    const query = { agency_id: req.agency._id };
+    
+    if (start_date && end_date) {
+      query.settlement_date = {
+        $gte: new Date(start_date),
+        $lte: new Date(end_date)
+      };
+    }
+    
+    if (status) query.status = status;
+    
+    const settlements = await Settlement.find(query)
+      .populate('booking_id')
+      .sort({ settlement_date: -1 });
+    
+    res.status(200).json({ settlements });
+    
+  } catch (err) {
+    console.error('❌ [SETTLEMENT] Get agency settlements error:', err);
+    res.status(500).json({ message: 'Failed to get settlements', error: err.message });
+  }
+});
+
+// Get doctor settlements
+app.get('/api/settlements/doctor', authenticateRole('doctor'), async (req, res) => {
+  try {
+    const { start_date, end_date, status } = req.query;
+    
+    const query = { doctor_id: req.doctor._id };
+    
+    if (start_date && end_date) {
+      query.settlement_date = {
+        $gte: new Date(start_date),
+        $lte: new Date(end_date)
+      };
+    }
+    
+    if (status) query.status = status;
+    
+    const settlements = await Settlement.find(query)
+      .populate('booking_id')
+      .populate('session_id')
+      .sort({ settlement_date: -1 });
+    
+    res.status(200).json({ settlements });
+    
+  } catch (err) {
+    console.error('❌ [SETTLEMENT] Get doctor settlements error:', err);
+    res.status(500).json({ message: 'Failed to get settlements', error: err.message });
+  }
+});
+
+// 🔔 NOTIFICATION ROUTES
+
+// Get user notifications
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+  try {
+    const { limit = 20 } = req.query;
+    
+    const notifications = await NotificationService.getUserNotifications(req.user._id, limit);
+    
+    res.status(200).json({ notifications });
+    
+  } catch (err) {
+    console.error('❌ [NOTIFICATION] Get notifications error:', err);
+    res.status(500).json({ message: 'Failed to get notifications', error: err.message });
+  }
+});
+
+// Test notification
+app.post('/api/notifications/test', authenticateToken, async (req, res) => {
+  try {
+    const { title, body, device_token } = req.body;
+    
+    if (!device_token) {
+      return res.status(400).json({ message: 'Device token is required for testing' });
+    }
+    
+    const result = await NotificationService.sendPushNotification(
+      device_token,
+      title || 'Test Notification',
+      body || 'This is a test notification from Clynicare',
+      { type: 'test' }
+    );
+    
+    res.status(200).json({ message: 'Test notification sent', result });
+    
+  } catch (err) {
+    console.error('❌ [NOTIFICATION] Test notification error:', err);
+    res.status(500).json({ message: 'Failed to send test notification', error: err.message });
+  }
+});
+
+// ENHANCED EXISTING ROUTES
+
+// 🔐 Send OTP for User Registration
+app.post('/api/user/send-otp', async (req, res) => {
   try {
     const { name, email, password, phone } = req.body;
-    console.log("🚀 Registering:", { name, email, phone });
+    console.log("🚀 Sending OTP for user registration:", { name, email, phone });
 
     if (!name || !email || !password || !phone) {
       return res.status(400).json({ message: "All fields are required" });
     }
 
-    console.log("here it is ")
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ message: "Invalid email format" });
+    }
+
+    // Validate phone format (10 digits)
+    const phoneRegex = /^[0-9]{10}$/;
+    if (!phoneRegex.test(phone)) {
+      return res.status(400).json({ message: "Phone number must be 10 digits" });
+    }
+
+    // Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return res.status(409).json({ message: "User already exists" });
+      return res.status(409).json({ message: "User already exists with this email" });
     }
+
+    // Delete any existing OTP for this email and type
+    await OTP.deleteMany({ email, userType: 'user' });
+
+    // Generate OTP
+    const otp = generateOTP();
+    
+    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const newUser = new User({
-      name,
+    // Store OTP and user data temporarily
+    const otpRecord = new OTP({
       email,
-      password: hashedPassword,
-      phone,
+      otp,
+      userType: 'user',
+      userData: {
+        name,
+        email,
+        password: hashedPassword,
+        phone
+      }
+    });
+
+    await otpRecord.save();
+
+    // Send OTP email
+    const emailResult = await sendUserRegistrationOTP(email, name, otp);
+    
+    if (!emailResult.success) {
+      return res.status(500).json({ message: "Failed to send OTP email", error: emailResult.error });
+    }
+
+    console.log("✅ OTP sent for user registration:", email);
+    res.status(200).json({ 
+      message: "OTP sent successfully to your email", 
+      email: email.replace(/(.{2})(.*)(@.*)/, '$1***$3') // Mask email for security
+    });
+  } catch (err) {
+    console.error("❌ Send OTP Error:", err);
+    res.status(500).json({ message: "Failed to send OTP", error: err.message });
+  }
+});
+
+// 🔐 Verify OTP and Complete User Registration
+app.post('/api/user/verify-otp', async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    console.log("🔍 Verifying OTP for user:", email);
+
+    if (!email || !otp) {
+      return res.status(400).json({ message: "Email and OTP are required" });
+    }
+
+    // Find OTP record
+    const otpRecord = await OTP.findOne({ email, userType: 'user', isVerified: false });
+    
+    if (!otpRecord) {
+      return res.status(400).json({ message: "OTP not found or already verified" });
+    }
+
+    // Check if OTP is correct
+    if (otpRecord.otp !== otp) {
+      // Increment attempts
+      otpRecord.attempts += 1;
+      await otpRecord.save();
+
+      if (otpRecord.attempts >= 3) {
+        await OTP.deleteOne({ _id: otpRecord._id });
+        return res.status(400).json({ message: "Too many incorrect attempts. Please request a new OTP." });
+      }
+
+      return res.status(400).json({ 
+        message: "Invalid OTP", 
+        attemptsLeft: 3 - otpRecord.attempts 
+      });
+    }
+
+    // Create user with stored data
+    const userData = otpRecord.userData;
+    const newUser = new User({
+      name: userData.name,
+      email: userData.email,
+      password: userData.password,
+      phone: userData.phone,
+      email_verified: true
     });
 
     await newUser.save();
-    console.log("✅ User registered:", email);
-    res.status(201).json({ message: "User registered successfully" });
+
+    // Mark OTP as verified and delete
+    await OTP.deleteOne({ _id: otpRecord._id });
+
+    // Send welcome email
+    await sendWelcomeEmail(userData.email, userData.name, 'user');
+
+    console.log("✅ User registered successfully:", userData.email);
+    res.status(201).json({ 
+      message: "User registered successfully",
+      user: {
+        id: newUser._id,
+        name: newUser.name,
+        email: newUser.email
+      }
+    });
   } catch (err) {
-    console.error("❌ Registration Error:", err);
+    console.error("❌ OTP Verification Error:", err);
     res.status(500).json({ message: "Registration failed", error: err.message });
+  }
+});
+
+// 🔐 Resend OTP for User Registration
+app.post('/api/user/resend-otp', async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    // Find existing OTP record
+    const existingOTP = await OTP.findOne({ email, userType: 'user', isVerified: false });
+    
+    if (!existingOTP) {
+      return res.status(400).json({ message: "No pending registration found for this email" });
+    }
+
+    // Generate new OTP
+    const newOtp = generateOTP();
+    
+    // Update OTP record
+    existingOTP.otp = newOtp;
+    existingOTP.attempts = 0;
+    existingOTP.createdAt = new Date();
+    await existingOTP.save();
+
+    // Send OTP email
+    const emailResult = await sendUserRegistrationOTP(email, existingOTP.userData.name, newOtp);
+    
+    if (!emailResult.success) {
+      return res.status(500).json({ message: "Failed to send OTP email", error: emailResult.error });
+    }
+
+    res.status(200).json({ message: "OTP resent successfully" });
+  } catch (err) {
+    console.error("❌ Resend OTP Error:", err);
+    res.status(500).json({ message: "Failed to resend OTP", error: err.message });
   }
 });
 
@@ -477,40 +1016,194 @@ app.get('/api/nurse-bookings', authenticateToken, async (req, res) => {
 
 // 🏥 AGENCY ROUTES
 
-// Agency registration
-app.post('/api/agency/register', async (req, res) => {
+// 🔐 Send OTP for Agency Registration
+app.post('/api/agency/send-otp', async (req, res) => {
   try {
-    const { name, email, password, phone, license_number, address, description, services_offered, coverage_areas } = req.body;
-    
+    const { name, email, password, phone, license_number, address, description, services_offered, coverage_areas, website } = req.body;
+    console.log("🚀 Sending OTP for agency registration:", { name, email, license_number });
+
+    // Validate required fields
+    if (!name || !email || !password || !phone || !license_number || !address) {
+      return res.status(400).json({ message: "Name, email, password, phone, license number, and address are required" });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ message: "Invalid email format" });
+    }
+
+    // Validate phone format (10 digits)
+    const phoneRegex = /^[0-9]{10}$/;
+    if (!phoneRegex.test(phone)) {
+      return res.status(400).json({ message: "Phone number must be 10 digits" });
+    }
+
+    // Check if agency already exists
     const existingAgency = await Agency.findOne({ $or: [{ email }, { license_number }] });
     if (existingAgency) {
-      return res.status(409).json({ message: "Agency already exists" });
+      return res.status(409).json({ message: "Agency already exists with this email or license number" });
     }
+
+    // Delete any existing OTP for this email and type
+    await OTP.deleteMany({ email, userType: 'agency' });
+
+    // Generate OTP
+    const otp = generateOTP();
     
+    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
-    
-    const newAgency = new Agency({
-      name,
+
+    // Store OTP and agency data temporarily
+    const otpRecord = new OTP({
       email,
-      password: hashedPassword,
-      phone,
-      license_number,
-      address,
-      description,
-      services_offered: services_offered || [],
-      coverage_areas: coverage_areas || [],
-      status: 'pending_verification', // Default pending status
-      is_verified: false // Requires admin approval
+      otp,
+      userType: 'agency',
+      userData: {
+        name,
+        email,
+        password: hashedPassword,
+        phone,
+        license_number,
+        address,
+        description,
+        website,
+        services_offered: services_offered || [],
+        coverage_areas: coverage_areas || [],
+        status: 'pending_verification',
+        is_verified: false
+      }
     });
+
+    await otpRecord.save();
+
+    // Send OTP email
+    const emailResult = await sendAgencyRegistrationOTP(email, name, otp);
     
-    await newAgency.save();
-    res.status(201).json({ 
-      message: "Agency registration submitted successfully. Please wait for admin approval.",
-      status: "pending_verification"
+    if (!emailResult.success) {
+      return res.status(500).json({ message: "Failed to send OTP email", error: emailResult.error });
+    }
+
+    console.log("✅ OTP sent for agency registration:", email);
+    res.status(200).json({ 
+      message: "OTP sent successfully to your email", 
+      email: email.replace(/(.{2})(.*)(@.*)/, '$1***$3') // Mask email for security
     });
   } catch (err) {
+    console.error("❌ Send Agency OTP Error:", err);
+    res.status(500).json({ message: "Failed to send OTP", error: err.message });
+  }
+});
+
+// 🔐 Verify OTP and Complete Agency Registration
+app.post('/api/agency/verify-otp', async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    console.log("🔍 Verifying OTP for agency:", email);
+
+    if (!email || !otp) {
+      return res.status(400).json({ message: "Email and OTP are required" });
+    }
+
+    // Find OTP record
+    const otpRecord = await OTP.findOne({ email, userType: 'agency', isVerified: false });
+    
+    if (!otpRecord) {
+      return res.status(400).json({ message: "OTP not found or already verified" });
+    }
+
+    // Check if OTP is correct
+    if (otpRecord.otp !== otp) {
+      // Increment attempts
+      otpRecord.attempts += 1;
+      await otpRecord.save();
+
+      if (otpRecord.attempts >= 3) {
+        await OTP.deleteOne({ _id: otpRecord._id });
+        return res.status(400).json({ message: "Too many incorrect attempts. Please request a new OTP." });
+      }
+
+      return res.status(400).json({ 
+        message: "Invalid OTP", 
+        attemptsLeft: 3 - otpRecord.attempts 
+      });
+    }
+
+    // Create agency with stored data
+    const agencyData = otpRecord.userData;
+    agencyData.email_verified = true;
+    const newAgency = new Agency(agencyData);
+
+    await newAgency.save();
+
+    // Mark OTP as verified and delete
+    await OTP.deleteOne({ _id: otpRecord._id });
+
+    // Send welcome email
+    await sendWelcomeEmail(agencyData.email, agencyData.name, 'agency');
+
+    console.log("✅ Agency registered successfully:", agencyData.email);
+    res.status(201).json({ 
+      message: "Agency registration submitted successfully. Please wait for admin approval.",
+      status: "pending_verification",
+      agency: {
+        id: newAgency._id,
+        name: newAgency.name,
+        email: newAgency.email,
+        status: newAgency.status
+      }
+    });
+  } catch (err) {
+    console.error("❌ Agency OTP Verification Error:", err);
     res.status(500).json({ message: "Registration failed", error: err.message });
   }
+});
+
+// 🔐 Resend OTP for Agency Registration
+app.post('/api/agency/resend-otp', async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    // Find existing OTP record
+    const existingOTP = await OTP.findOne({ email, userType: 'agency', isVerified: false });
+    
+    if (!existingOTP) {
+      return res.status(400).json({ message: "No pending agency registration found for this email" });
+    }
+
+    // Generate new OTP
+    const newOtp = generateOTP();
+    
+    // Update OTP record
+    existingOTP.otp = newOtp;
+    existingOTP.attempts = 0;
+    existingOTP.createdAt = new Date();
+    await existingOTP.save();
+
+    // Send OTP email
+    const emailResult = await sendAgencyRegistrationOTP(email, existingOTP.userData.name, newOtp);
+    
+    if (!emailResult.success) {
+      return res.status(500).json({ message: "Failed to send OTP email", error: emailResult.error });
+    }
+
+    res.status(200).json({ message: "OTP resent successfully" });
+  } catch (err) {
+    console.error("❌ Resend Agency OTP Error:", err);
+    res.status(500).json({ message: "Failed to resend OTP", error: err.message });
+  }
+});
+
+// Agency registration (DEPRECATED - use OTP-based registration above)
+app.post('/api/agency/register', async (req, res) => {
+  res.status(400).json({ 
+    message: "This endpoint is deprecated. Please use /api/agency/send-otp for registration.",
+    deprecated: true
+  });
 });
 
 // Agency login
@@ -567,54 +1260,14 @@ app.post('/api/agency/login', async (req, res) => {
   }
 });
 
-// Agency middleware
-const authenticateAgency = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.split(' ')[1];
-  
-  if (!token) return res.status(401).json({ message: "Access denied. No token provided." });
-  
-  try {
-    const decoded = jwt.verify(token, SECRET_KEY);
-    if (decoded.type !== 'agency') {
-      return res.status(403).json({ message: "Access denied. Agency token required." });
-    }
-    
-    const agency = await Agency.findById(decoded.agencyID);
-    if (!agency) return res.status(404).json({ message: "Agency not found" });
-    
-    req.agency = agency;
-    next();
-  } catch (err) {
-    res.status(403).json({ message: "Invalid token", error: err.message });
-  }
-};
+// Agency middleware (DEPRECATED - using authenticateRole('agency'))
+const authenticateAgency = authenticateRole('agency');
 
-// Nurse middleware
-const authenticateNurse = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.split(' ')[1];
-  
-  if (!token) return res.status(401).json({ message: "Access denied. No token provided." });
-  
-  try {
-    const decoded = jwt.verify(token, SECRET_KEY);
-    if (decoded.type !== 'nurse') {
-      return res.status(403).json({ message: "Access denied. Nurse token required." });
-    }
-    
-    const nurse = await Nurse.findById(decoded.nurseID).populate('agency_id');
-    if (!nurse) return res.status(404).json({ message: "Nurse not found" });
-    
-    req.nurse = nurse;
-    next();
-  } catch (err) {
-    res.status(403).json({ message: "Invalid token", error: err.message });
-  }
-};
+// Nurse middleware (DEPRECATED - using authenticateRole('nurse'))
+const authenticateNurse = authenticateRole('nurse');
 
 // Add nurse (Agency only)
-app.post('/api/agency/nurses', authenticateAgency, async (req, res) => {
+app.post('/api/agency/nurses', authenticateRole('agency'), async (req, res) => {
   try {
     console.log('Creating nurse with data:', req.body);
     
@@ -672,7 +1325,7 @@ app.post('/api/agency/nurses', authenticateAgency, async (req, res) => {
 });
 
 // Get agency's nurses
-app.get('/api/agency/nurses', authenticateAgency, async (req, res) => {
+app.get('/api/agency/nurses', authenticateRole('agency'), async (req, res) => {
   try {
     const nurses = await Nurse.find({ agency_id: req.agency._id })
       .sort({ createdAt: -1 });
@@ -684,7 +1337,7 @@ app.get('/api/agency/nurses', authenticateAgency, async (req, res) => {
 });
 
 // Update nurse
-app.put('/api/agency/nurses/:id', authenticateAgency, async (req, res) => {
+app.put('/api/agency/nurses/:id', authenticateRole('agency'), async (req, res) => {
   try {
     console.log('Updating nurse:', req.params.id, 'with data:', req.body);
     
@@ -748,7 +1401,7 @@ app.put('/api/agency/nurses/:id', authenticateAgency, async (req, res) => {
 });
 
 // Delete nurse
-app.delete('/api/agency/nurses/:id', authenticateAgency, async (req, res) => {
+app.delete('/api/agency/nurses/:id', authenticateRole('agency'), async (req, res) => {
   try {
     const nurse = await Nurse.findOneAndDelete({ 
       _id: req.params.id, 
@@ -764,7 +1417,7 @@ app.delete('/api/agency/nurses/:id', authenticateAgency, async (req, res) => {
 });
 
 // Nurse confirms/rejects booking
-app.put('/api/nurse/bookings/:id/confirm', authenticateNurse, async (req, res) => {
+app.put('/api/nurse/bookings/:id/confirm', authenticateRole('nurse'), async (req, res) => {
   try {
     const { id } = req.params;
     const { action, rejection_reason } = req.body;
@@ -845,7 +1498,7 @@ app.get('/api/bookings/:id/status', async (req, res) => {
 });
 
 // Get nurse's assigned bookings
-app.get('/api/nurse/bookings', authenticateNurse, async (req, res) => {
+app.get('/api/nurse/bookings', authenticateRole('nurse'), async (req, res) => {
   try {
     const bookings = await NurseBooking.find({ nurse_id: req.nurse._id })
       .populate('patient_id', 'name email phone')
@@ -861,7 +1514,7 @@ app.get('/api/nurse/bookings', authenticateNurse, async (req, res) => {
 // BOOKING MANAGEMENT ROUTES
 
 // Get bookings for agency (to assign to nurses)
-app.get('/api/agency/bookings', authenticateAgency, async (req, res) => {
+app.get('/api/agency/bookings', authenticateRole('agency'), async (req, res) => {
   try {
     const bookings = await NurseBooking.find({
       nurse_id: { $in: await Nurse.find({ agency_id: req.agency._id }).select('_id') }
@@ -915,7 +1568,7 @@ app.put('/api/bookings/:id/status', async (req, res) => {
 });
 
 // Nurse handoff to doctor (for teleconsultancy)
-app.put('/api/bookings/:id/handoff-to-doctor', authenticateNurse, async (req, res) => {
+app.put('/api/bookings/:id/handoff-to-doctor', authenticateRole('nurse'), async (req, res) => {
   try {
     const { vital_signs, nurse_notes } = req.body;
     
@@ -967,7 +1620,7 @@ app.put('/api/bookings/:id/handoff-to-doctor', authenticateNurse, async (req, re
 });
 
 // Complete service (nurse marks service as completed)
-app.put('/api/bookings/:id/complete', authenticateNurse, async (req, res) => {
+app.put('/api/bookings/:id/complete', authenticateRole('nurse'), async (req, res) => {
   try {
     const { notes, vital_signs } = req.body;
     
@@ -1055,28 +1708,324 @@ app.post('/api/nurse/login', async (req, res) => {
   }
 });
 
+// 👨‍⚕️ DOCTOR REGISTRATION ROUTES
+
+// 🔐 Send OTP for Doctor Registration
+app.post('/api/doctor/send-otp', async (req, res) => {
+  try {
+    const { 
+      name, 
+      email, 
+      phone, 
+      medical_license, 
+      specialization, 
+      sub_specializations, 
+      experience_years, 
+      consultation_fee, 
+      education, 
+      availability, 
+      bio, 
+      languages 
+    } = req.body;
+    
+    console.log("🚀 Sending OTP for doctor registration:", { name, email, medical_license, specialization });
+
+    // Validate required fields
+    if (!name || !email || !phone || !medical_license || !specialization || !experience_years || !consultation_fee) {
+      return res.status(400).json({ 
+        message: "Name, email, phone, medical license, specialization, experience years, and consultation fee are required" 
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ message: "Invalid email format" });
+    }
+
+    // Validate phone format (10 digits)
+    const phoneRegex = /^[0-9]{10}$/;
+    if (!phoneRegex.test(phone)) {
+      return res.status(400).json({ message: "Phone number must be 10 digits" });
+    }
+
+    // Validate experience years
+    if (experience_years < 0 || experience_years > 50) {
+      return res.status(400).json({ message: "Experience years must be between 0 and 50" });
+    }
+
+    // Validate consultation fee
+    if (consultation_fee < 0) {
+      return res.status(400).json({ message: "Consultation fee must be a positive number" });
+    }
+
+    // Check if doctor already exists
+    const existingDoctor = await Doctor.findOne({ $or: [{ email }, { medical_license }] });
+    if (existingDoctor) {
+      return res.status(409).json({ message: "Doctor already exists with this email or medical license" });
+    }
+
+    // Delete any existing OTP for this email and type
+    await OTP.deleteMany({ email, userType: 'doctor' });
+
+    // Generate OTP
+    const otp = generateOTP();
+
+    // Store OTP and doctor data temporarily
+    const otpRecord = new OTP({
+      email,
+      otp,
+      userType: 'doctor',
+      userData: {
+        name,
+        email,
+        phone,
+        medical_license,
+        specialization,
+        sub_specializations: sub_specializations || [],
+        experience_years: parseInt(experience_years),
+        consultation_fee: parseFloat(consultation_fee),
+        education: education || [],
+        availability: availability || {
+          days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+          hours: { start: '09:00', end: '17:00' }
+        },
+        bio: bio || '',
+        languages: languages || ['English'],
+        rating: 0,
+        total_consultations: 0,
+        total_reviews: 0,
+        status: 'active',
+        is_verified: false,
+        video_call_enabled: true
+      }
+    });
+
+    await otpRecord.save();
+
+    // Send OTP email
+    const emailResult = await sendDoctorRegistrationOTP(email, name, otp);
+    
+    if (!emailResult.success) {
+      return res.status(500).json({ message: "Failed to send OTP email", error: emailResult.error });
+    }
+
+    console.log("✅ OTP sent for doctor registration:", email);
+    res.status(200).json({ 
+      message: "OTP sent successfully to your email", 
+      email: email.replace(/(.{2})(.*)(@.*)/, '$1***$3') // Mask email for security
+    });
+  } catch (err) {
+    console.error("❌ Send Doctor OTP Error:", err);
+    res.status(500).json({ message: "Failed to send OTP", error: err.message });
+  }
+});
+
+// 🔐 Verify OTP and Complete Doctor Registration
+app.post('/api/doctor/verify-otp', async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    console.log("🔍 Verifying OTP for doctor:", email);
+
+    if (!email || !otp) {
+      return res.status(400).json({ message: "Email and OTP are required" });
+    }
+
+    // Find OTP record
+    const otpRecord = await OTP.findOne({ email, userType: 'doctor', isVerified: false });
+    
+    if (!otpRecord) {
+      return res.status(400).json({ message: "OTP not found or already verified" });
+    }
+
+    // Check if OTP is correct
+    if (otpRecord.otp !== otp) {
+      // Increment attempts
+      otpRecord.attempts += 1;
+      await otpRecord.save();
+
+      if (otpRecord.attempts >= 3) {
+        await OTP.deleteOne({ _id: otpRecord._id });
+        return res.status(400).json({ message: "Too many incorrect attempts. Please request a new OTP." });
+      }
+
+      return res.status(400).json({ 
+        message: "Invalid OTP", 
+        attemptsLeft: 3 - otpRecord.attempts 
+      });
+    }
+
+    // Create doctor with stored data
+    const doctorData = otpRecord.userData;
+    doctorData.email_verified = true;
+    const newDoctor = new Doctor(doctorData);
+
+    await newDoctor.save();
+
+    // Mark OTP as verified and delete
+    await OTP.deleteOne({ _id: otpRecord._id });
+
+    // Send welcome email
+    await sendWelcomeEmail(doctorData.email, doctorData.name, 'doctor');
+
+    console.log("✅ Doctor registered successfully:", doctorData.email);
+    res.status(201).json({ 
+      message: "Doctor registration submitted successfully. Please wait for admin approval.",
+      status: "pending_verification",
+      doctor: {
+        id: newDoctor._id,
+        name: newDoctor.name,
+        email: newDoctor.email,
+        specialization: newDoctor.specialization,
+        is_verified: newDoctor.is_verified
+      }
+    });
+  } catch (err) {
+    console.error("❌ Doctor OTP Verification Error:", err);
+    res.status(500).json({ message: "Registration failed", error: err.message });
+  }
+});
+
+// 🔐 Resend OTP for Doctor Registration
+app.post('/api/doctor/resend-otp', async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    // Find existing OTP record
+    const existingOTP = await OTP.findOne({ email, userType: 'doctor', isVerified: false });
+    
+    if (!existingOTP) {
+      return res.status(400).json({ message: "No pending doctor registration found for this email" });
+    }
+
+    // Generate new OTP
+    const newOtp = generateOTP();
+    
+    // Update OTP record
+    existingOTP.otp = newOtp;
+    existingOTP.attempts = 0;
+    existingOTP.createdAt = new Date();
+    await existingOTP.save();
+
+    // Send OTP email
+    const emailResult = await sendDoctorRegistrationOTP(email, existingOTP.userData.name, newOtp);
+    
+    if (!emailResult.success) {
+      return res.status(500).json({ message: "Failed to send OTP email", error: emailResult.error });
+    }
+
+    res.status(200).json({ message: "OTP resent successfully" });
+  } catch (err) {
+    console.error("❌ Resend Doctor OTP Error:", err);
+    res.status(500).json({ message: "Failed to resend OTP", error: err.message });
+  }
+});
+
 // Doctor login
 app.post('/api/doctor/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     
-    // Mock authentication for now
-    if (email === 'dr.amit@email.com' && password === 'password123') {
-      const token = jwt.sign({ doctorID: '1', type: 'doctor' }, SECRET_KEY, { expiresIn: '24h' });
-      res.status(200).json({ 
-        token, 
-        doctor: { 
-          id: '1', 
-          name: 'Dr. Amit Verma', 
-          email: 'dr.amit@email.com',
-          specialization: 'General Medicine'
-        } 
-      });
-    } else {
-      res.status(401).json({ message: "Invalid credentials" });
+    if (!email || !password) {
+      return res.status(400).json({ message: "Email and password are required" });
     }
+
+    // Find doctor by email
+    const doctor = await Doctor.findOne({ email });
+    if (!doctor) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    // Note: Since doctors registered via OTP don't have passwords initially,
+    // you may want to add a separate endpoint for doctors to set their password
+    // For now, we'll check if password is set and if not, suggest password setup
+    if (!doctor.password) {
+      return res.status(400).json({ 
+        message: "Password not set. Please set your password first.",
+        requirePasswordSetup: true,
+        doctorId: doctor._id
+      });
+    }
+
+    // Compare password
+    const isMatch = await bcrypt.compare(password, doctor.password);
+    if (!isMatch) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    // Check verification status
+    if (!doctor.is_verified) {
+      return res.status(403).json({ 
+        message: "Your doctor profile is pending admin verification. Please wait for approval.",
+        status: "pending_verification"
+      });
+    }
+
+    if (doctor.status === 'inactive') {
+      return res.status(403).json({ 
+        message: "Your doctor account has been deactivated. Please contact support.",
+        status: "inactive"
+      });
+    }
+
+    const token = jwt.sign({ doctorID: doctor._id, type: 'doctor' }, SECRET_KEY, { expiresIn: '24h' });
+    
+    res.status(200).json({ 
+      token, 
+      doctor: { 
+        id: doctor._id,
+        name: doctor.name,
+        email: doctor.email,
+        specialization: doctor.specialization,
+        consultation_fee: doctor.consultation_fee,
+        rating: doctor.rating,
+        total_consultations: doctor.total_consultations
+      } 
+    });
   } catch (err) {
+    console.error('❌ [DOCTOR] Login error:', err);
     res.status(500).json({ message: "Login failed", error: err.message });
+  }
+});
+
+// 🔐 Set Password for Doctor (after OTP verification)
+app.post('/api/doctor/set-password', async (req, res) => {
+  try {
+    const { email, password, confirmPassword } = req.body;
+    
+    if (!email || !password || !confirmPassword) {
+      return res.status(400).json({ message: "Email, password, and confirm password are required" });
+    }
+
+    if (password !== confirmPassword) {
+      return res.status(400).json({ message: "Passwords do not match" });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters long" });
+    }
+
+    // Find doctor
+    const doctor = await Doctor.findOne({ email });
+    if (!doctor) {
+      return res.status(404).json({ message: "Doctor not found" });
+    }
+
+    // Hash the password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    // Update doctor with password
+    doctor.password = hashedPassword;
+    await doctor.save();
+
+    res.status(200).json({ message: "Password set successfully. You can now login." });
+  } catch (err) {
+    console.error('❌ [DOCTOR] Set password error:', err);
+    res.status(500).json({ message: "Failed to set password", error: err.message });
   }
 });
 
@@ -1117,33 +2066,11 @@ app.post('/api/admin/login', async (req, res) => {
   }
 });
 
-// Admin middleware
-const authenticateAdmin = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.split(' ')[1];
-  
-  if (!token) return res.status(401).json({ message: "Access denied. No token provided." });
-  
-  try {
-    const decoded = jwt.verify(token, SECRET_KEY);
-    if (decoded.type !== 'admin') {
-      return res.status(403).json({ message: "Access denied. Admin token required." });
-    }
-    
-    const admin = await Admin.findById(decoded.adminID);
-    if (!admin || admin.status !== 'active') {
-      return res.status(404).json({ message: "Admin not found or inactive" });
-    }
-    
-    req.admin = admin;
-    next();
-  } catch (err) {
-    res.status(403).json({ message: "Invalid token", error: err.message });
-  }
-};
+// Admin middleware (DEPRECATED - using authenticateRole('admin'))
+const authenticateAdmin = authenticateRole('admin');
 
 // Get pending agencies for approval
-app.get('/api/admin/agencies/pending', authenticateAdmin, async (req, res) => {
+app.get('/api/admin/agencies/pending', authenticateRole('admin'), async (req, res) => {
   try {
     const agencies = await Agency.find({ 
       status: 'pending_verification',
@@ -1157,7 +2084,7 @@ app.get('/api/admin/agencies/pending', authenticateAdmin, async (req, res) => {
 });
 
 // Approve/Reject agency
-app.put('/api/admin/agencies/:id/status', authenticateAdmin, async (req, res) => {
+app.put('/api/admin/agencies/:id/status', authenticateRole('admin'), async (req, res) => {
   try {
     const { status, rejection_reason } = req.body; // status: 'active' or 'inactive'
     
@@ -1186,7 +2113,7 @@ app.put('/api/admin/agencies/:id/status', authenticateAdmin, async (req, res) =>
 });
 
 // Get all agencies (for admin)
-app.get('/api/admin/agencies', authenticateAdmin, async (req, res) => {
+app.get('/api/admin/agencies', authenticateRole('admin'), async (req, res) => {
   try {
     const { status, page = 1, limit = 10 } = req.query;
     const query = status ? { status } : {};
@@ -1231,10 +2158,12 @@ app.post('/api/test-sms', async (req, res) => {
   }
 });
 
-// Global Error Handler
-app.use((err, req, res, next) => {
-  console.error("🔥 Server error:", err.stack);
-  res.status(500).json({ message: "Internal Server Error", error: err.message });
-});
+// Apply comprehensive error handling middleware
+app.use(errorHandler);
 
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`� Server running on port ${PORT}`);
+  console.log(`🏥 Clynicare Healthcare Platform API`);
+  console.log(`📱 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`� API Documentation: http://localhost:${PORT}/api-docs`);
+});

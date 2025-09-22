@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const doctorSchema = new mongoose.Schema({
     name: { type: String, required: true, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true },
+    password: { type: String, minlength: 6 }, // Optional initially, set after OTP verification
     phone: { type: String, required: true, match: /^[0-9]{10}$/ },
     medical_license: { type: String, required: true, unique: true },
     specialization: { type: String, required: true },
@@ -29,7 +30,8 @@ const doctorSchema = new mongoose.Schema({
     total_reviews: { type: Number, default: 0 },
     status: { type: String, enum: ['active', 'inactive', 'busy'], default: 'active' },
     is_verified: { type: Boolean, default: false },
-    video_call_enabled: { type: Boolean, default: true }
+    video_call_enabled: { type: Boolean, default: true },
+    email_verified: { type: Boolean, default: false } // Track if email is verified via OTP
 }, { timestamps: true });
 
 const Doctor = mongoose.model('Doctor', doctorSchema);
